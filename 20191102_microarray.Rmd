@@ -1,0 +1,303 @@
+---
+title: "20191102_microarray"
+author: "juyoutai"
+date: "2019/10/31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+## Microarray
+
+Let's analyse microarray. I used the workflow below as reference <http://bioconductor.org/packages/release/workflows/html/maEndToEnd.html>.
+
+
+```{r packages, message=FALSE}
+# 20191102 handson microarray analysis at YCU, Fuku-ura
+# Affymetrics microarray
+# read CEL files, RMA normalisation, PCA, clustering, DEA, visualisation
+# Metascape and other web tools
+
+# data
+# WT and Bcl6 cKO (Itgax-cre maybe?) mice splenic DCs(cDC1, cDC2, pDC)
+# Kenneth Murphy's lab, unpublished data
+# accession number GSE135904 https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE135904
+# platform [MoGene-1_0-st] Affymetrix Mouse Gene 1.0 ST Array [transcript (gene) version]
+
+##############
+# install and load required packages
+library(BiocManager)
+# BiocManager::install(c("mogene10sttranscriptcluster.db", "pd.mogene.1.0.st.v1", GEOquery"))
+library(GEOquery)
+library(mogene10sttranscriptcluster.db)
+library(pd.mogene.1.0.st.v1)
+library(oligo)
+library(limma)
+# general packeges
+library(tidyverse)
+library(gplots)
+library(ggrepel)
+library(viridis)
+library(RColorBrewer)
+```
+
+
+```{r data}
+############### 
+# download the raw data from GEO
+# download manually from https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE135904
+# we are going to compare WT vs Bcl6cKO cDC1 this time
+# or
+# automatically download
+# using GEOquery package
+# getGEOSuppFiles('GSE135904', fetch_files = TRUE) # download 
+list.files("GSE135904/GSE135904_RAW/")
+
+# read CEL files
+# extract only cDC1 data
+celFiles <- list.celfiles("GSE135904/GSE135904_RAW/", listGzipped = T, full.names = TRUE)
+celFiles2 <- celFiles %>% str_subset(pattern = "cDC1") # extract which contains "cDC1" in its name
+affyRaw <- oligo::read.celfiles(celFiles2) # reading CEL files
+# next step is normalisation
+# RMA - Robust Multichip Average algorithm
+# Robust Multichip Average preprocessing methodology. 
+# This strategy allows background subtraction, quantile normalization and summarization (via median-polish).
+# RMA method is now the most popular normalisation methods for Affymetrics microarray. There are other methods like MAS5 and gcrma.
+eset <- oligo::rma(affyRaw)
+
+```
+
+```{r quality check}
+#################### 
+#quality check
+# boxplot
+par(mfrow = c(1,2)) # separate plot panel
+oligo::boxplot(affyRaw, target = "core", las = 3, main = "raw data")
+oligo::boxplot(eset, las = 3, main = "normalised data (RMA method)")
+# dev.off() # 画面を閉じる
+
+# density plot
+oligo::hist(affyRaw, target = "core", main = "raw data")
+oligo::hist(eset, main = "normalised data (RMA method)")
+
+# output an expression matrix
+Biobase::write.exprs(eset, file = "cDC1_gene_expression.txt")
+
+# perform PCA and clustering
+cDC1_gene_expression <- Biobase::exprs(eset)
+colnames(cDC1_gene_expression) <- c("WT_1", "WT_2", "WT_3", "cKO_1", "cKO_2", "cKO_3", "cKO_4")
+
+```
+
+
+```{r hc_dendro}
+# hierarchical clustering
+dist <- as.dist(1 - cor(cDC1_gene_expression, method = "pearson")) # calculate Pearson's distance
+cluster_ward <- hclust(dist, method = "ward.D2") # ward method
+cluster_ave <- hclust(dist, method = "average") #  group average method
+# par(mfrow = c(1,2))
+plot(cluster_ward, main = "ward", hang = -1)
+plot(cluster_ave, main = "average", hang = -1) # any differences b/w these?
+# dev.off() # 画面を閉じる
+```
+
+
+```{r quality check_2}
+# PCA
+# R uses `prcomp` function for PCA
+# generally speaking, an expression matrix has samples in its rows and genes in columns
+# so we need to transpose its rows and columns
+# by using t() function in R
+PCA <- prcomp(t(cDC1_gene_expression), scale = FALSE) # data already normalised so that "scale = FALSE"
+percentVar <- round(100*PCA$sdev^2/sum(PCA$sdev^2),1) # calculate stats, these codes copied from somewhere 
+sd_ratio <- sqrt(percentVar[2] / percentVar[1])
+is(PCA)
+is(PCA$x[, 1:2])
+PCA.df <- PCA$x[, 1:2] # PCC1, PC2を抽出
+PCA.df
+# add phenodata column
+PCA.df <- transform(PCA.df, Pheno = c("WT", "WT", "WT", "cKO", "cKO", "cKO", "cKO"))
+PCA.df
+# plot using ggplot2 (better than base plot)
+ggplot(as.data.frame(PCA.df), aes(PC1, PC2)) +
+  xlab(paste0("PC1, VarExp: ", percentVar[1], "%")) +
+  ylab(paste0("PC2, VarExp: ", percentVar[2], "%")) + 
+  geom_point() + theme_bw() +
+  geom_text_repel(label = colnames(cDC1_gene_expression))+ 
+  coord_fixed(ratio = 1)
+# by colour
+ggplot(as.data.frame(PCA.df), aes(PC1, PC2, colour = Pheno)) +
+  xlab(paste0("PC1, VarExp: ", percentVar[1], "%")) +
+  ylab(paste0("PC2, VarExp: ", percentVar[2], "%")) + 
+  geom_point() + theme_bw() +
+  geom_text_repel(label = colnames(cDC1_gene_expression)) + 
+  coord_fixed(ratio = 1)
+```
+
+```{r annotation}
+#############
+# probe annotation
+# probeID and gene name
+# just one example here
+mogene10sttranscriptcluster.db
+pd.mogene.1.0.st.v1
+AnnotationDbi::columns(mogene10sttranscriptcluster.db)
+key <- AnnotationDbi::keys(mogene10sttranscriptcluster.db, keytype = "PROBEID")
+annot <- AnnotationDbi::select(mogene10sttranscriptcluster.db, 
+                               keys = key, 
+                               columns = c("SYMBOL", "GENENAME"), 
+                               keytype = "PROBEID")
+# you can see many probes not assigned to any genes
+# we remove these probes here
+annot_NA <- dplyr::filter(annot, is.na(SYMBOL))
+annot <- dplyr::filter(annot, !is.na(SYMBOL))
+# you may also notice some probes assigned to several genes
+# remove multiple assigned probes 
+anno_grouped <- group_by(annot, PROBEID)
+anno_summarized <- 
+  dplyr::summarize(anno_grouped, no_of_matches = n_distinct(SYMBOL))
+tail(anno_summarized)
+anno_multimap <- filter(anno_summarized, no_of_matches > 1)
+head(anno_multimap)
+
+# convert matrix to tibble
+# rowname (PROBEID) to 1st column
+cDC1_gene_expression_tb <- as.data.frame(cDC1_gene_expression) %>%
+  tibble::rownames_to_column(var = "PROBEID")
+
+# remove unmapped or multi-mapped probes from expression data
+# %in% means "contained in"
+cDC1_gene_expression_filtered <- cDC1_gene_expression_tb %>% 
+  dplyr::filter(!(PROBEID %in% c(anno_multimap$PROBEID, annot_NA$PROBEID)))
+
+# we conduct DEA without unmapped or multi-mapped probes
+str(cDC1_gene_expression)
+str(cDC1_gene_expression_filtered)
+
+# limmaの受け付ける型に戻す
+cDC1_gene_expression <- cDC1_gene_expression_filtered %>% 
+  tibble::column_to_rownames(var = "PROBEID")
+str(cDC1_gene_expression)
+
+```
+
+```{r limma DEA}
+#################
+# DEA
+groups <- factor(c(0, 0, 0, 1, 1, 1, 1))
+groups
+design <- model.matrix(~ 0 + groups)
+design
+colnames(design) <- c("WT", "cKO")
+design
+contrast.matrix <- makeContrasts(WTvscKO = WT - cKO, levels = design)
+contrast.matrix
+
+# fit to linear model
+fit <- lmFit(cDC1_gene_expression, design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2, proportion = 0.01)
+topTable(fit2)
+top250 <- topTable(fit2, adjust="fdr", sort.by="B", number=250) 
+
+summary(decideTests(fit2))
+limma::plotMA(fit2)
+limma::plotSA(fit2)
+limma::volcanoplot(fit2)
+# restore limma's result
+# convert again
+# There must be better way
+# PROBEID 1st column
+# tibbleのrownames_to_columnという便利な関数がある
+limma_result <- topTable(fit2, sort.by = "logFC", 
+                         adjust.method = "fdr", number = Inf) %>% 
+  tibble::rownames_to_column(var = "PROBEID")
+
+# time to join
+# PROBEIDをkeyにgene nameを対応させる
+limma_result_gene <- dplyr::left_join(limma_result, annot, by = "PROBEID")
+write.table(limma_result_gene, file = "limma_result_gene.txt", sep = "\t", row.names = F)
+# adjusted P value < 0.05を抽出
+limma_DEG <- limma_result_gene %>% 
+  dplyr::filter(adj.P.Val < 0.05)
+# finish
+# これで終了！
+# あとは可視化、高次解析
+
+```
+
+
+```{r visualisation}
+########
+# visualisation
+cDC1_gene_expression_filtered_gene <- cDC1_gene_expression_filtered %>% 
+  dplyr::left_join(annot, by = "PROBEID")
+
+Zeb2 <- filter(cDC1_gene_expression_filtered_gene, SYMBOL == "Zeb2") %>% select(2:8) 
+barplot(as.matrix(Zeb2), xlab = "sample", ylab = "log2 expression", main = "Zeb2", las = 3)
+
+Ccl24 <- filter(cDC1_gene_expression_filtered_gene, SYMBOL == "Ccl24") %>% select(2:8) 
+barplot(as.matrix(Ccl24), xlab = "sample", ylab = "log2 expression", main = "Ccl24", las = 3)
+
+# # baseのmergeだとデフォルトで完全一致のみ返す？
+# この辺りの挙動をきちんと調べるか？
+# 今更baseそんなに使わない？？？
+# limma_result_merge <- merge(limma_result, anno_summarized, by = "PROBEID", all.x = F)
+
+# FDRが0.05以下の遺伝子のみ抜き出す
+
+# let's use ggplot2
+# MA plot
+ma <- ggplot(data = limma_result, aes(x = AveExpr, y = logFC)) + 
+  geom_point(size = 0.4) +
+  geom_point(data = limma_DEG, colour = "red", size = 0.7) + 
+  theme_classic()
+ma
+# rabel gene symbol
+ma + geom_text_repel(data = limma_DEG, aes(label = SYMBOL))
+
+# volcano plot
+vp <- ggplot(data = limma_result, aes(x = logFC, y = -log10(P.Value))) +
+  geom_point(size = 0.3) +
+  geom_point(data = limma_DEG, colour = "red", size = 0.3) +
+  theme_classic()
+vp
+vp + geom_text_repel(data = limma_DEG, aes(label = SYMBOL))
+
+
+# heatmap
+# gplots::heatmap.2()
+heatmap_DEG <- cDC1_gene_expression_filtered_gene %>% 
+  filter(SYMBOL %in% limma_DEG$SYMBOL) %>% 
+  select(SYMBOL, everything()) %>% select(1,3:9) %>% 
+  distinct(SYMBOL, .keep_all = TRUE) %>% 
+  tibble::column_to_rownames(var = "SYMBOL")
+colnames(heatmap_DEG) <- c("WT_1", "WT_2", "WT_3", "cKO_1", "cKO_2", "cKO_3", "cKO_4")
+
+heatmap.2(as.matrix(heatmap_DEG), col = brewer.pal(11,"RdBu"), trace = "none", cexCol = 0.9, cexRow = 0.5, scale = "row")
+heatmap.2(as.matrix(heatmap_DEG), col = brewer.pal(9,"YlGnBu"), trace = "none", cexCol = 0.9, cexRow = 0.5, scale = "row")
+heatmap.2(as.matrix(heatmap_DEG), col = bluered(256), trace = "none", cexCol = 0.9, cexRow = 0.5, scale = "row")
+
+Seurat <- colorRampPalette(c("#FF00FF", "#000000", "#FFFF00"))
+heatmap.2(as.matrix(heatmap_DEG), col = Seurat, trace = "none", cexCol = 0.9, cexRow = 0.5, scale = "row")
+
+
+# png("heatmap.png", width = 1800, height = 600, res = 150)
+# heatmap.2(t(as.matrix(heatmap_DEG)), col = Seurat, trace = "none", 
+#           cexCol = 0.4, cexRow = 1, scale = "col")
+# dev.off()
+
+# 
+# 
+# library(tidyverse)
+# for (i in c(viridis, magma, plasma, inferno, cividis)) {
+#   heatmap.2(as.matrix(heatmap_2), col = i, trace = "none", cexCol = 0.9, cexRow = 0.5, scale = "row")
+# }
+```
+
+```{r sessioninfo}
+sessionInfo()
+```
+
